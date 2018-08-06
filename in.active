@@ -1,0 +1,121 @@
+##
+variable        mu equal 1.0
+variable        Damp      equal 100           # inverse of damp coefficient, collision_time = 1/(kn*invD)
+variable        Va        equal 0.5            # magnitude of the active velocity
+variable        Dr        equal 0.001            # value of the rotational diffusion constant
+variable      sim_steps   equal 20000000
+variable      dt_inter    equal 0.00004
+
+
+##
+dimension       3
+units           lj
+atom_modify	map array
+atom_style	sphere
+boundary	p p p
+newton		off
+fix		prop_director all property/atom d_dx d_dy d_dz d_tx d_ty d_tz ghost no
+read_data       initconf.d fix prop_director NULL Directors
+set             type 1 mass 1.0
+velocity        all set 0.0 0.0 0.0
+comm_modify 	vel yes
+timestep	0.0001
+neighbor	0.3 bin                # skin style
+neigh_modify	every 1 delay 0        # getting the advantage of skin use check yes (default settings)
+##############################################################################################
+
+##############################################################################################
+#####################################################
+## Defining potential parameters
+#####################################################
+variable        Kn	 equal  200000.0
+variable        Kt	 equal  ${Kn}*2.0/7.0
+variable        Gamman	 equal  0.0
+variable        Gammat	 equal  0.0
+variable        xmu     equal 0.0
+variable        dampflag equal  0      #(0-->excluded tangential damping force)
+
+pair_style      gran/hooke/history ${Kn} ${Kt} ${Gamman} ${Gammat} ${xmu} ${dampflag}
+pair_coeff	* *
+##############################################################################################
+
+##############################################################################################
+#####################################################
+## Minimizing
+#####################################################
+variable	T equal .0
+fix 		LAN all langevin ${T} ${T} 0.1 48279 omega yes
+fix 		NVE all nve/sphere
+
+run		100000
+
+unfix		NVE
+unfix		LAN
+##############################################################################################
+
+##############################################################################################
+#####################################################
+## Equilibrating
+#####################################################
+pair_style   gran/hooke/history ${Kn} ${Kt} ${Gamman} ${Gammat} ${mu} ${dampflag}
+pair_coeff * *
+
+timestep	${dt_inter}
+reset_timestep  0
+variable	slopeMSAD equal 2*${Dr}        # slope of the MSAD along X
+fix		NVE all brownian/active/sphere ${Damp} ${Va} ${slopeMSAD} 48279
+
+run		${sim_steps}
+##############################################################################################
+
+
+##############################################################################################
+#####################################################
+## Production run
+#####################################################
+
+# print out various average quantities
+################################################
+variable        dinterval equal logfreq(10,9,10)
+compute 	gmsd1 all msd com yes
+variable        cmsd equal c_gmsd1[1]+c_gmsd1[2]+c_gmsd1[3]
+variable        cmsd4 equal c_gmsd1[4]
+compute         tsph all temp/sphere
+compute		gpres all pressure tsph virial # global pressure tensor (virial part)
+variable	time equal step*dt
+
+
+fix PRINT all print 10000 '${time} ${cmsd} ${cmsd4}' file lammps_msd.txt
+
+# this order is essential
+thermo_style    custom step v_time temp press c_gmsd1[4]
+thermo_modify   temp tsph   # temp including both the translational and rotational ke
+thermo          v_dinterval
+
+################################################
+# dump per atom and per pair information
+################################################
+compute         cdirx all property/atom d_dx
+compute         cdiry all property/atom d_dy
+compute         cdirz all property/atom d_dz
+compute         cthtx all property/atom d_tx
+compute         cthty all property/atom d_ty
+compute         cthtz all property/atom d_tz
+
+shell           mkdir dumps 
+dump            dc all custom ${dinterval} dumps/dumpfile.*.txt id x y z xu yu zu vx vy vz fx fy fz radius c_cdirx c_cdiry c_cdirz c_cthtx c_cthty c_cthtz
+dump_modify     dc every v_dinterval first yes
+dump_modify     dc pad 10 
+dump_modify     dc sort id 
+################################################
+
+reset_timestep  0
+
+run		300000000
+
+unfix		NVE
+undump          dc
+##############################################################################################
+
+# write the cooled configuration to a restart file
+#write_restart   cfg0.rst
